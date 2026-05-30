@@ -35,8 +35,8 @@ knitr::opts_chunk$set(echo = TRUE)
 folder = "ADD PATH HERE"
 
 ## Farmworkers 
-file <- paste0(folder, "/01a_final data/01_farmworker_imputation_pred.csv")
-df.farmworker <- fread(file) %>%
+file <- paste0(folder, "/01a_final data/01_farmworker_imputation_pred.rds")
+df.farmworker <- readRDS(file) %>%
   mutate(variable = case_when(
     variable %in% c("Hired Labor", "Unpaid Labor") ~ "Hired+Unpaid Labor",
     variable == "Migrant Labor (incl hired)" ~ "Migrant Labor"
@@ -48,7 +48,7 @@ df.farmworker <- fread(file) %>%
 
 ## Days of co-exposure to HI above thresholds
 file = paste0(folder, "/01a_final data/03_HI_smoke_2008-2023.csv")
-df.HI.smoke <- fread(file ) %>%
+df.HI.smoke <- readRDS(file ) %>%
   mutate(region_2 = factor(region_2, levels = c(  "East North Central" , "Middle Atlantic",   "New England" ,
                                                  "West South Central", "East South Central" , "South Atlantic",
                                                  "Pacific", "Mountain", "West North Central" ))) %>%

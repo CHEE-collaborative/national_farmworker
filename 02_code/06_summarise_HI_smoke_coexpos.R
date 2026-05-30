@@ -46,8 +46,10 @@ df.farmworker.clean <- df.farmworker %>%
     region_2 %in% c("Mountain", "Pacific") ~ "West"
   )) 
 
-file <- paste0(folder, "/01a_final data/01_farmworker_imputation_pred.csv")
-fwrite(df.farmworker.clean, file)
+
+file <- paste0(folder, "/01a_final data/01_farmworker_imputation_pred.rds")
+saveRDS(df.farmworker.clean, file)
+
 
 
 
@@ -75,8 +77,8 @@ df.HI.f<- df.HI %>%
     region_2 %in% c("Mountain", "Pacific") ~ "West"
   )) 
 
-file = paste0(folder, "/01a_final data/02_HI_2008-2023.csv")
-fwrite(df.HI.f, file)
+file = paste0(folder, "/01a_final data/02_HI_2008-2023.rds")
+saveRDS(df.HI.f, file)
 
   
 
@@ -105,8 +107,8 @@ df.HI.smoke.f<- df.HI.smoke %>%
     region_2 %in% c("Mountain", "Pacific") ~ "West"
   )) 
 
-file = paste0(folder, "/01a_final data/03_HI_smoke_2008-2023.csv")
-fwrite(df.HI.smoke.f, file)
+file = paste0(folder, "/01a_final data/03_HI_smoke_2008-2023.rds")
+saveRDS(df.HI.smoke.f, file)
 
 
 
