@@ -1,0 +1,259 @@
+---
+title: "11_Supplementary_Tables.Rmd"
+output: html_document
+date: "2026-05-30"
+editor_options: 
+  chunk_output_type: console
+---
+
+PURPOSE: Supplementary Tables Calculations
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(data.table)
+library(collapse)
+library(sf)
+library(tigris)
+library(openxlsx)
+
+options(scipen = 99999)
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Read in files 
+```{r}
+folder = "ADD PATH HERE"
+
+## Farmworkers 
+file <- paste0(folder, "/01_data/01_farmworker_imputation_pred.csv")
+df.farmworker <- fread(file) %>%
+  mutate(variable = case_when(
+    variable %in% c("Hired Labor", "Unpaid Labor") ~ "Hired+Unpaid Labor",
+    variable == "Migrant Labor (incl hired)" ~ "Migrant Labor"
+  )) %>%
+  group_by(Year, STATEFIPS, STATEABB, STATENAME, CNTYFIPS, GEOID, region_2, region_1, variable) %>%
+  summarise(across(c(n_farmworkers, n_farmworker_imput), ~sum(.))) %>%
+  filter(Year %in% 2008:2023) 
+
+## Days of exposure to HI above thresholds
+file = "/home/jp3343/R_farmworker/03_outputs/v2_05a_HI_2008-2024.csv"
+df.HI <- fread(file ) %>%
+  mutate(region_2 = factor(region_2, levels = c(  "East North Central" , "Middle Atlantic",   "New England" ,
+                                                 "West South Central", "East South Central" , "South Atlantic",
+                                                 "Pacific", "Mountain", "West North Central" ))) %>%
+  mutate(month.abb = fct_reorder(month.abb, month))
+
+
+## Days of co-exposure to HI above threhsolds
+file = "/home/jp3343/R_farmworker/03_outputs/v3_05c_HI_smoke_2008-2024.csv"
+df.HI.smoke <- fread(file ) %>%
+  mutate(region_2 = factor(region_2, levels = c(  "East North Central" , "Middle Atlantic",   "New England" ,
+                                                 "West South Central", "East South Central" , "South Atlantic",
+                                                 "Pacific", "Mountain", "West North Central" ))) %>%
+  mutate(month.abb = fct_reorder(month.abb, month))
+```
+
+# Count annual co-exposure days above threshold
+```{r}
+df.HI.smoke.FW <- df.HI.smoke %>%
+  mutate(coexpos = if_else(smokePM_pred.wtd > 0 , "coexpos_days", "no coexpos"),
+         coexpos = if_else(is.na(smokePM_pred.wtd), "no coexpos", coexpos)) %>%
+    fgroup_by(GEOID, region_2, region_1, STATEFIPS, STATEABB, CNTYFIPS, CNTYNAME,crop_class,Year, coexpos ) %>%
+  fsummarise(n_days_80F = fsum(mean.HI.wtd >=80   &  coexpos == "coexpos_days"),
+             n_days_90F = fsum(mean.HI.wtd >=90   &  coexpos == "coexpos_days"),
+             n_days_100F = fsum(mean.HI.wtd >=100 & coexpos == "coexpos_days"),
+             n_days_110F = fsum(mean.HI.wtd >=110 & coexpos == "coexpos_days")
+             )  %>%
+  full_join(., df.farmworker) %>%
+  pivot_longer(names_to = "thresholds",
+               values_to = "n_days",
+               cols = 11:14) %>%
+  mutate(`thresholds` = factor(`thresholds`, 
+                                           levels = c("n_days_80F",
+                                                      "n_days_90F",
+                                                      "n_days_100F",
+                                                      "n_days_110F"))) %>%
+  mutate(FW_coexpos_days = n_days * n_farmworker_imput) %>%
+  filter(coexpos == "coexpos_days") %>%
+  select(GEOID, region_2, STATEABB, Year, crop_class, thresholds, coexpos, FW_coexpos_days, variable)
+
+```
+
+# Supp Table 1 - percent change in average annual migrant FW-coexposure days by region
+## 2019-2023 vs 2008-2012
+```{r}
+## Average annual county migrant FW-coexpos days in 2008-2012 and 2019-2023 periods
+df.x <- df.HI.smoke.FW %>%
+  filter(crop_class == 1,
+         coexpos == "coexpos_days",
+          variable == "Migrant Labor") %>%
+    ### Average annual county migrant FW-coexposure days in 2008-2012 and 2019-2023 periods
+  mutate(indicator = case_when(
+    Year %in% 2008:2012 ~ "2008-2012",
+    Year %in% 2019:2023 ~ "2019-2023"
+  )) %>%
+  fgroup_by(indicator, region_2, STATEABB, GEOID, variable, thresholds, crop_class) %>%
+  fsummarise(FW_coexpos_days = fmean(FW_coexpos_days, na.rm=TRUE)) %>%
+  pivot_wider(names_from = indicator,
+              values_from = FW_coexpos_days)
+
+## Calculate percent change in total average annual migrant FW-co-exposure days in each region 
+df.fw.days.chng <- df.x %>%
+    ### total average annual migrant FW-coexposure days in each region
+ fgroup_by(region_2, variable, thresholds) %>%
+  fsummarise(total.avg.08 = fsum(`2008-2012`, na.rm = TRUE),
+             total.avg.19 = fsum(`2019-2023`, na.rm = TRUE)) %>%
+  ungroup() %>%
+    ### calculate percent change
+  mutate(diff.08.23 = total.avg.19 - total.avg.08,
+         prop.08.23 = diff.08.23 / total.avg.08, 
+         prop.08.23 = if_else(diff.08.23 == 0, 0, prop.08.23)   ) 
+
+file = paste0(folder, "/03_outputs/SuppTable1_chng_migrants.xlsx" )
+write.xlsx(df.fw.days.chng, file)
+```
+
+# Supplementary Table 2-3 - Temporal trend negative binomial regressions of co-expos days, FW, FW-coexpos days
+## National 
+```{r}
+library(fixest)
+
+## Count coexposure days above 80F and 90F thresholds
+df.coexposdays <- df.HI.smoke %>%
+  mutate(coexpos = if_else(smokePM_pred.wtd > 0 , "coexpos_days", "no coexpos"),
+         coexpos = if_else(is.na(smokePM_pred.wtd), "no coexpos", coexpos)) %>%
+  select(region_2, region_1, GEOID, STATEFIPS, STATEABB, CNTYFIPS, CNTYNAME, Year, month, month.abb, yearmonday, crop_class, total_county_crop_area, mean.HI.wtd, smokePM_pred.wtd, coexpos) %>%
+  fgroup_by(GEOID, region_2, region_1, STATEFIPS, STATEABB, CNTYFIPS, CNTYNAME,crop_class, coexpos, Year) %>%
+  fsummarise(n_days_80F = fsum(mean.HI.wtd >=80   &  coexpos == "coexpos_days"),
+             n_days_90F = fsum(mean.HI.wtd >=90   &  coexpos == "coexpos_days")
+             ) %>% 
+  filter(crop_class == 1, coexpos == "coexpos_days")
+
+
+## Count of farmworkers
+df.fw <- df.farmworker %>%
+  filter(variable == "Hired+Unpaid Labor") %>%
+  mutate(n_farmworker_imput = if_else(is.na(n_farmworker_imput), 0, n_farmworker_imput))
+
+
+## FW-Coexpos days
+df.coexpos.fw <- full_join(df.coexposdays, df.fw) %>%
+  mutate(fw.days.80 = n_farmworker_imput * n_days_80F,
+         fw.days.90 = n_farmworker_imput * n_days_90F)
+
+
+## Regressions 
+# Coexposure days
+x.80.nb <- fenegbin(n_days_80F ~ Year | GEOID, data = df.coexposdays, cluster = "GEOID")
+x.90.nb <- fenegbin(n_days_90F ~ Year | GEOID, data = df.coexposdays, cluster = "GEOID")
+
+# Farmworkers
+x.fw.nb <- fenegbin(n_farmworker_imput ~ Year | GEOID, data = df.fw, cluster = "GEOID")
+
+# FW-Coexpos days
+x.coexpos.fw.80.nb <- fenegbin(fw.days.80 ~ Year | GEOID, data = df.coexpos.fw, cluster = "GEOID")
+x.coexpos.fw.90.nb <- fenegbin(fw.days.90 ~ Year | GEOID, data = df.coexpos.fw, cluster = "GEOID")
+```
+
+Tidy regression results and save
+```{r}
+df.nb <- bind_rows(data.frame(broom::tidy(x.80.nb), indicator = "80F coexpos days"),
+                data.frame(broom::tidy(x.90.nb), indicator = "90F coexpos days"),
+                data.frame(broom::tidy(x.fw.nb), indicator = "FW"),
+                data.frame(broom::tidy(x.coexpos.fw.80.nb), indicator = "80F FW-coexpos days"),
+                data.frame(broom::tidy(x.coexpos.fw.90.nb), indicator = "90F FW-coexpos days"),
+                ) %>%
+  mutate(p.value = round(p.value, 10),
+         CI.low = estimate - std.error,
+         CI.high = estimate + std.error,
+         exp_estim = exp(estimate),
+         exp_CI.low = exp(CI.low),
+         exp_CI.high = exp(CI.high),
+         perc.change = paste0(round((exp_estim - 1) * 100,2), "% (", round((exp_CI.low - 1) * 100, 2), " - ", round((exp_CI.high - 1) * 100, 2), ")" ) 
+         ) 
+
+
+file = paste0(folder, "/03_outputs/SuppTable2_reg_natl.xlsx" )
+write.xlsx(df.nb, file)
+```
+
+## By regions
+Function: (1) conduct regression and (2) calculate annual percent change from regression estimate
+```{r}
+fxn.reg <- function(x, df){
+  print(x)
+  temp <- substr(x, nchar(x)-3, nchar(x)-2)
+  FW <- substr(x, nchar(x)-1, nchar(x))
+  region = substr(x, 1, nchar(x)-5)
+
+  # select formula (based on co-expos days vs FW vs FW-coexpos days)  
+  if(temp == "80" & FW == "XX"){
+    formula <- n_days_80F ~ Year | GEOID
+  } else if(temp == "90" & FW == "XX"){
+    formula <- n_days_90F ~ Year | GEOID
+  } else if(temp == "00" & FW == "FW"){
+    formula = n_farmworker_imput ~ Year | GEOID
+  } else if (temp == "80" & FW == "FW"){
+    formula = fw.days.80 ~ Year | GEOID
+  } else if (temp == "90" & FW == "FW"){
+    formula = fw.days.90 ~ Year | GEOID
+  }
+  
+  # regression
+  x.nb <- fenegbin(fml = formula, data = df %>% filter(region_2 == region), cluster = "GEOID")
+  
+  # tidy regression results
+  df.x <- data.frame(thresh = if_else(temp=="00", "", temp),
+                     FW = if_else(FW == "FW", "FW", ""),
+                     region_2 = region,
+                     broom::tidy(x.nb)  )  %>%
+  mutate(p.value = round(p.value, 10),
+         CI.low = estimate - std.error,
+         CI.high = estimate + std.error,
+         exp_estim = exp(estimate),
+         exp_CI.low = exp(CI.low),
+         exp_CI.high = exp(CI.high),
+         estim = paste0(round(estimate,4), " (", round(std.error, 4), ")"),
+         perc.change = paste0(round((exp_estim - 1) * 100,2), "% (", round((exp_CI.low - 1) * 100, 2), " - ", round((exp_CI.high - 1) * 100, 2), ")" )  )  %>%
+           filter(term == "Year")
+      
+}
+
+```
+
+### Run reg function for co-expos days, FW, FW-coexpos days
+Coexposure days
+```{r}
+ls.regions <- unique(df.coexposdays$region_2)
+
+ls.reg.temp <- expand.grid(ls.regions, c("80", "90"), c("XX")) %>%
+  mutate(x = paste0(Var1, "_", Var2, Var3))
+
+df.reg.coexpos = bind_rows(lapply(ls.reg.temp$x, fxn.reg, df = df.coexposdays) )
+```
+
+Farmworkers
+```{r}
+ls.reg.temp <- expand.grid(ls.regions, c("00"), c("FW")) %>%
+  mutate(x = paste0(Var1, "_", Var2, Var3))
+
+df.reg.FW = bind_rows(lapply(ls.reg.temp$x, fxn.reg, df = df.fw) )
+```
+
+FW-coexposure days
+```{r}
+ls.reg.temp <- expand.grid(ls.regions, c("80", "90"), c("FW")) %>%
+  mutate(x = paste0(Var1, "_", Var2, Var3))
+
+df.reg.coexpos.FW = bind_rows(lapply(ls.reg.temp$x, fxn.reg, df = df.coexpos.fw) )
+```
+
+Save results
+```{r}
+df.final <- list(df.reg.coexpos, df.reg.FW, df.reg.coexpos.FW)
+names(df.final) <- c("coexpos days", "FW", "FW-days")
+
+file = paste0(folder, "/03_outputs/SuppTable3_reg_regions.xlsx" )
+write.xlsx(df.final, file)
+```

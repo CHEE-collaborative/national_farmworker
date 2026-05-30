@@ -1,0 +1,353 @@
+---
+title: "Untitled"
+output: html_document
+date: "2026-05-30"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(data.table)
+library(collapse)
+library(sf)
+library(tigris)
+library(tmap)
+library(tmaptools)
+library(openxlsx)
+library(ggh4x)
+library(patchwork)
+library(ggrepel)
+library(scales)
+library(svglite)
+library(RColorBrewer)
+library(ggview)
+
+options(scipen = 99999)
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Read in files 
+```{r}
+folder = "ADD PATH HERE"
+
+## Farmworkers 
+file <- paste0(folder, "/01a_final data/01_farmworker_imputation_pred.csv")
+df.farmworker <- fread(file) %>%
+  mutate(variable = case_when(
+    variable %in% c("Hired Labor", "Unpaid Labor") ~ "Hired+Unpaid Labor",
+    variable == "Migrant Labor (incl hired)" ~ "Migrant Labor"
+  )) %>%
+  group_by(Year, STATEFIPS, STATEABB, STATENAME, CNTYFIPS, GEOID, region_2, region_1, variable) %>%
+  summarise(across(c(n_farmworkers, n_farmworker_imput), ~sum(.)))
+
+
+## Days of exposure to HI above thresholds
+file = paste0(folder, "/01a_final data/02_HI_2008-2023.csv")
+df.HI <- fread(file ) %>%
+  mutate(region_2 = factor(region_2, levels = c(  "East North Central" , "Middle Atlantic",   "New England" ,
+                                                 "West South Central", "East South Central" , "South Atlantic",
+                                                 "Pacific", "Mountain", "West North Central" ))) %>%
+  mutate(month.abb = fct_reorder(month.abb, month))
+
+
+## Days of co-exposure to HI above thresholds
+file = paste0(folder, "/01a_final data/03_HI_smoke_2008-2023.csv")
+df.HI.smoke <- fread(file ) %>%
+  mutate(region_2 = factor(region_2, levels = c(  "East North Central" , "Middle Atlantic",   "New England" ,
+                                                 "West South Central", "East South Central" , "South Atlantic",
+                                                 "Pacific", "Mountain", "West North Central" ))) %>%
+  mutate(month.abb = fct_reorder(month.abb, month))
+
+
+## Counties sf
+sf.counties <- counties(cb = TRUE, progress_bar = FALSE, year = 2021) %>%
+  filter(!STUSPS %in% c("AK", 'HI', "PR", "AS", "MP", "GU", "VI")) %>%
+  transmute(STATEFIPS = as.numeric( STATEFP), CNTYNAME = NAME, STATEABB = STUSPS, GEOID = as.numeric(GEOID))
+
+## state sf
+sf.states <- sf.counties %>%
+  group_by(STATEABB) %>%
+  summarise(totalFIPS = fsum(STATEFIPS)) %>%
+  ungroup() %>%
+  st_make_valid()
+  
+## region sf
+sf.regions <- sf.counties %>%
+  mutate(region_2 = case_when(
+    STATEABB %in% c("CT", "ME", "MA", "NH", "VT", "RI") ~ "New England",
+    STATEABB %in% c("NY", "PA", "NJ") ~ "Middle Atlantic",
+    STATEABB %in% c("OH", "IN", "IL", "MI", "WI") ~ "East North Central",
+    STATEABB %in% c("DE", "MD", "DC", "VA", "WV", "NC", "SC", "GA", "FL") ~ "South Atlantic",
+    STATEABB %in% c("KY", "TN", "AL", "MS") ~ "East South Central",
+    STATEABB %in% c("TX", "LA", "AR", "OK") ~ "West South Central",
+    STATEABB %in% c("ND", "MN", "SD", "IA", "NE", "KS", "MO") ~ "West North Central",
+    STATEABB %in% c("MT", "WY", "ID", "NV", "UT", "CO", "AZ", "NM" ) ~ "Mountain",
+    STATEABB %in% c("WA", "OR", "CA") ~ "Pacific"
+  ) ) %>%
+  group_by(region_2) %>%
+  summarise(totalFIPS = fsum(STATEFIPS)) %>%
+  ungroup() %>%
+  st_make_valid()
+```
+
+
+
+# Fig 2A - Line graph of total FW-HI exposure days and FW-co-exposure days, 2008-2023, 80F and 90F
+## Calculate FW-days / FW-coexposure days
+```{r}
+## FW-HI exposure days
+df.HI.FW <- df.HI %>%
+  fgroup_by(GEOID, region_2, region_1, STATEFIPS, STATEABB, CNTYFIPS, CNTYNAME,crop_class,Year ) %>%
+  fsummarise(n_days_80F = fsum(mean.HI.wtd >=80 , na.rm = TRUE),
+             n_days_90F = fsum(mean.HI.wtd >=90 , na.rm = TRUE),
+             n_days_100F = fsum(mean.HI.wtd >=100, na.rm = TRUE),
+             n_days_110F = fsum(mean.HI.wtd >=110, na.rm = TRUE)
+             ) %>%
+  full_join(., df.farmworker) %>%
+  pivot_longer(names_to = "thresholds",
+               values_to = "n_days",
+               cols = 10:13) %>%
+  mutate(FW_days = n_days * n_farmworker_imput) %>%
+  filter(crop_class == 1,) %>%
+  select(GEOID, region_2, Year, crop_class, thresholds, FW_days, variable)
+
+
+# FW-Coexpos days
+df.HI.smoke.FW <- df.HI.smoke %>%
+  mutate(coexpos = if_else(smokePM_pred.wtd > 0 , "coexpos_days", "no coexpos"),
+         coexpos = if_else(is.na(smokePM_pred.wtd), "no coexpos", coexpos)) %>%
+    fgroup_by(GEOID, region_2, region_1, STATEFIPS, STATEABB, CNTYFIPS, CNTYNAME,crop_class,Year, coexpos ) %>%
+  fsummarise(n_days_80F = fsum(mean.HI.wtd >=80   &  coexpos == "coexpos_days"),
+             n_days_90F = fsum(mean.HI.wtd >=90   &  coexpos == "coexpos_days"),
+             n_days_100F = fsum(mean.HI.wtd >=100 & coexpos == "coexpos_days"),
+             n_days_110F = fsum(mean.HI.wtd >=110 & coexpos == "coexpos_days")
+             )  %>%
+  full_join(., df.farmworker) %>%
+  pivot_longer(names_to = "thresholds",
+               values_to = "n_days",
+               cols = 11:14) %>%
+  mutate(FW_coexpos_days = n_days * n_farmworker_imput) %>%
+  filter(coexpos == "coexpos_days",
+         crop_class == 1,) %>%
+  select(GEOID, region_2, Year, crop_class, thresholds, FW_coexpos_days, variable)
+
+# Join df for graph and calculate national FW-days / FW-coexposure days
+df.hi.FW.coexpos <- full_join(df.HI.FW, df.HI.smoke.FW) %>%
+  filter(variable == "Hired+Unpaid Labor") %>%
+  ## sum for national estimate
+  group_by(Year, crop_class, thresholds, variable) %>%
+  summarise(across(c(FW_days, FW_coexpos_days), ~sum(., na.rm = TRUE))) %>%
+  ungroup() %>%
+  mutate(`thresholds` = factor(`thresholds`, 
+                                           levels = c("n_days_80F",
+                                                      "n_days_90F",
+                                                      "n_days_100F",
+                                                      "n_days_110F"))) %>%
+  pivot_longer(names_to = "category",
+               values_to = "FW_days",
+               cols = 5:6) %>%
+  mutate(category = case_when(
+    category == "FW_days"  ~ "Farmworker-days",
+    category == "FW_coexpos_days" ~ "Farmworker-days of coexposure"),
+    category = factor(category, levels = c("Farmworker-days", "Farmworker-days of coexposure"))
+  )
+
+```
+
+
+## Plot line graph
+```{r}
+x <- df.hi.FW.coexpos %>% 
+  filter(thresholds %in% c("n_days_80F", "n_days_90F")) %>%
+  ggplot() +
+  geom_point(aes(x =Year, y= FW_days, colour = category), size = 0.5) +
+  geom_line(aes(x =Year,  y= FW_days,  colour = category)) +
+  theme_bw() +
+    scale_y_continuous(
+      name = "Farmworker-days (millions)",
+      labels = label_number(scale = 1e-6 )  ) +
+    scale_color_manual(values = c("#D95F02", "#1B9E77")) +
+    facet_wrap(~thresholds, scales = "free", ncol = 1, labeller = thresh) +
+  theme(aspect.ratio = 0.6) +
+  theme(strip.background = element_rect(fill = "white", color = "black") ) +
+    theme(legend.title = element_blank(),
+          axis.title.x = element_blank(),
+          text = element_text(size = 6, family = 'calibri')) +
+  canvas(width = 6, height = 5.5 )
+
+```
+
+Save image
+```{r}
+filename = paste0(folder, "/03_outputs/Fig2A_line graph.png")
+save_ggplot(x, filename)
+```
+
+
+# Fig 2B - Bivariate map of EHSA hotspot clusters, 80F and 90F thresholds
+Bivariate map of EHSA hotspot clusters of days above 80F / 90F thresholds
+- Bivariate categories: EHSA hotspot category vs threshold (80F, 90F, both)
+  1. Read in ArcGIS EHSA results shp file
+  2. Recategorize automatic EHSA patterns
+        - New hotspot and Consecutive hotspots --> Recent hotspot
+        - Persistent hotspot and Historical hotspot --> Consistent hotspot
+        - Intensifying hotspot --> Intensifying hotspot
+        - All others --> "No Pattern Detected"
+  3. Label counties if it had a significant EHSA category was in 80F EHSA, 90F EHSA, or in both
+```{r}
+## 80F
+file.80 <- paste0(folder, "/01a_final data/EHSA_results/EHSA_natl_80F.shp") ### EHSA shp file
+sf.80 <- st_read(file.80) %>%
+    mutate(PATTERN = case_when(
+    PATTERN %in% c("New Hot Spot", "Consecutive Hot Spot" ) ~ "Recent Hot Spot",
+    PATTERN %in% c("Persistent Hot Spot", "Historical Hot Spot") ~ "Consistent Hot Spot",
+    PATTERN %in% c("Sporadic Hot Spot", "Oscillating Hot Spot") ~ "No Pattern Detected",
+    TRUE ~ PATTERN
+  )) %>%
+  transmute(LOC_LABEL, CATEGORY,
+              PATTERN_80 = PATTERN)
+
+## 90F
+file.90 <- file.80 <- paste0(folder, "/01a_final data/EHSA_results/EHSA_natl_90F.shp") ### EHSA shp file
+sf.90 <- st_read(file.90) %>%
+    mutate(PATTERN = case_when(
+    PATTERN %in% c("New Hot Spot", "Consecutive Hot Spot" ) ~ "Recent Hot Spot",
+    PATTERN %in% c("Persistent Hot Spot", "Historical Hot Spot") ~ "Consistent Hot Spot",
+    PATTERN %in% c("Sporadic Hot Spot", "Oscillating Hot Spot") ~ "No Pattern Detected",
+    TRUE ~ PATTERN
+  )) %>%
+  transmute(LOC_LABEL, CATEGORY,PATTERN)
+
+## Both 80F and 90F
+df.90 <- st_read(file.90) %>%
+    mutate(PATTERN = case_when(
+    PATTERN %in% c("New Hot Spot", "Consecutive Hot Spot" ) ~ "Recent Hot Spot",
+    PATTERN %in% c("Persistent Hot Spot", "Historical Hot Spot") ~ "Consistent Hot Spot",
+    PATTERN %in% c("Sporadic Hot Spot", "Oscillating Hot Spot") ~ "No Pattern Detected",
+    TRUE ~ PATTERN
+  )) %>%
+  st_drop_geometry() %>%
+  transmute(LOC_LABEL, CATEGORY,
+              PATTERN_90 = PATTERN)
+  
+### join EHSA 80F and 90F results; identify ones with the same pattern in both EHSA; filter for only those counties
+sf.80.90 <- full_join(sf.80, df.90) %>%  
+  mutate(PATTERN_BOTH = case_when(
+    PATTERN_80 == PATTERN_90 ~ PATTERN_80
+  )) %>%
+  filter(!PATTERN_BOTH %in% c("No Pattern Detected")) %>%
+  filter(!is.na(PATTERN_BOTH)) %>%
+  mutate(THRESHOLD = "Both") %>%
+  rename(PATTERN = PATTERN_BOTH) %>%
+  select(LOC_LABEL, CATEGORY, THRESHOLD, PATTERN, geometry)
+
+
+## remove "no pattern detected" from 80F and 90F df
+sf.80.c <- sf.80 %>%
+  transmute(LOC_LABEL, CATEGORY, 
+            THRESHOLD = "80F",
+            PATTERN = PATTERN_80) %>%
+  filter(!PATTERN %in% c("No Pattern Detected")) %>%
+  filter(!is.na(PATTERN))  %>%
+  filter(!LOC_LABEL %in% unique(sf.80.90$LOC_LABEL))
+
+
+sf.90.c <- sf.90 %>%
+  transmute(LOC_LABEL, CATEGORY, 
+            THRESHOLD = "90F",
+            PATTERN ) %>%
+  filter(!PATTERN %in% c("No Pattern Detected")) %>%
+  filter(!is.na(PATTERN)) %>%
+  filter(!LOC_LABEL %in% unique(sf.80.90$LOC_LABEL))
+  
+
+# Bind all df  
+sf.all <- bind_rows(sf.80.90,
+                    sf.80.c,
+                    sf.90.c)
+  
+  
+# Plot bivariate map
+x.80.90<- tm_shape(sf.counties) +
+  tm_borders(col = "grey80",
+             lwd = 0.1) +
+  tm_shape(sf.states) +
+  tm_borders(col = "grey60",
+             lwd = 0.5) +
+  tm_shape(sf.regions) +
+  tm_borders(col = "black",
+             lwd = 0.1) +
+  tm_shape(sf.all ) +
+  tm_polygons(fill = tm_vars(c("THRESHOLD", "PATTERN"), multivariate = TRUE),
+              fill.scale = tm_scale_bivariate(values = "purplegold"),
+              fill.legend = tm_legend_bivariate(xlab = "",
+                                                ylab = ""),
+              lwd = 0.1)
+```
+
+Save map
+```{r}
+filename = paste0(folder, "/03_outputs/Fig2B_map_80F90F.png")
+tmap_save(x.80.90, filename)
+```
+
+  PATTERN                   n
+  <chr>                 <int>
+1 Consistent Hot Spot      58
+2 Intensifying Hot Spot    52
+3 Recent Hot Spot         462
+
+# Fig 2C - Map of change in average annual migrant labor, 2019-2023 vs 2008-2012
+```{r}
+sf.migrants <- df.farmworker %>%
+  mutate(indicator = case_when(
+    Year %in% 2008:2012 ~ "2008-2012",
+    Year %in% 2019:2023 ~ "2019-2023"
+  )) %>%
+  # average number of migrant FW in each period
+  fgroup_by(indicator, GEOID, region_2, variable) %>%
+  fsummarise(mean_n_farmworker_imput = fmean(n_farmworker_imput)) %>%
+  filter(!is.na(indicator)) %>%
+  pivot_wider(names_from = indicator,
+              values_from = mean_n_farmworker_imput) %>%
+  # difference in migrant FW between periods
+  mutate(diff.08.23 = `2019-2023` - `2008-2012`, 
+         perc.08.23 = diff.08.23/`2008-2012`,
+         perc.08.23.100 = diff.08.23*100/`2008-2012`) %>%
+  full_join(sf.counties, .) %>%
+  filter(variable %in% c("Migrant Labor")) %>%
+  ungroup() %>%
+  relocate(geometry, .after = last_col())
+
+x.2 <- tm_shape(sf.migrants) + 
+    tm_polygons(fill = "perc.08.23.100",
+                lwd = 0.01,
+                col = "grey90",
+                fill.scale = tm_scale( style = "fixed",
+                                       values = c("#DFC27D", "#F6E8C3", "#80CDC1", "#018571"),
+                                       breaks = c(-100, 0, 1, 100, 3600),
+                                       # n = 4,
+                                        # interval.closure = "right",
+                                       as.count = TRUE,
+                                       value.na = "grey90",
+                                       label.na = "No data unavailable",
+                                        label.format = list(digits = 0, suffix = "%")
+                                       ),
+                fill.legend = tm_legend(title = "Migrant Labor (% change)")
+                ) +
+  tm_shape(sf.states) +
+  tm_borders(col = "grey60",
+             lwd = 0.5) +
+  tm_shape(sf.regions) +
+  tm_borders(col = "black",
+             lwd = 0.1) 
+```
+
+Save map
+```{r}
+filename = paste0(folder, "/03_outputs/Fig2C_map_migrant_labor.png")
+tmap_save(x.2, filename)
+```
+
