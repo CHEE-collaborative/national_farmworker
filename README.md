@@ -1,6 +1,9 @@
 # Heat and wildfire smoke exposures among farmworkers in the U.S.
 **Authors**: Jamie Ponmattam<sup>1</sup> and Daniel Carrión*<sup>2,3</sup>
 
+Publication: [_link_]
+> Manuscrupt in preparation
+
 ---
 # Research Overview
 US farmworkers face rising co-exposure to extreme heat and wildfire smoke without federal occupational protection. Using county-level heat index, wildfire smoke, and farmworker counts from 2008–2023, we show that emerging hotspots of co-exposure, and the steepest increases for migrant farmworkers, concentrate in states without heat or smoke standards. These climate-driven occupational hazards are increasingly concentrated in jurisdictions without worker protection.
