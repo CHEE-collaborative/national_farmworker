@@ -28,10 +28,10 @@ Analysis was conducted in R 4.4.1-foss-2022b using R studio. 02_code files 02_**
 **Steps:** See 02_code> 07a_EHSA parameters
 
 ---
-# Citation
+### Citation
 > Manuscrupt in preparation
 
-# Affiliations
+### Affiliations
 > Affiliations:
 > <br>1 Occupational & Environmental Medicine Program, Yale School of Medicine, New Haven, CT 
 > <br>2 Department of Environmental Health Sciences, Yale School of Public Health, New Haven, CT 
