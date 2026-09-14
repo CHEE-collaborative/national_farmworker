@@ -1,0 +1,502 @@
+---
+title: "Fig1_final"
+output: html_document
+date: "2026-08-18"
+editor_options: 
+  chunk_output_type: console
+---
+
+PURPOSE: Create Figure 1
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(collapse)
+library(data.table)
+library(sf)
+library(tigris)
+library(tmap)
+library(tmaptools)
+library(openxlsx)
+library(ggh4x)
+library(scales)
+library(RColorBrewer)
+
+options(scipen = 99999)
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Read in files
+```{r}
+folder = "ADD PATH HERE"
+
+## Farmworker counts
+file <- paste0(folder, "/01a_final data/01_farmworker_imputation_pred.rds")
+df.farmworker <- fread(file) %>%
+  mutate(variable = case_when(
+    variable %in% c("Hired Labor", "Unpaid Labor") ~ "Hired+Unpaid Labor",
+    variable == "Migrant Labor (incl hired)" ~ "Migrant Labor"
+  )) %>%
+  group_by(Year, STATEFIPS, STATEABB, STATENAME, CNTYFIPS, GEOID, region_2, region_1, variable) %>%
+  summarise(across(c(n_farmworkers, n_farmworker_imput), ~sum(.))) %>%
+  ungroup()
+
+
+## Days of co-exposure to HI above thresholds
+file = paste0(folder, "/01a_final data/03_HI_smoke_2008-2023.csv")
+df.HI.smoke <- readRDS(file ) %>%
+  mutate(region_2 = factor(region_2, levels = c(  "East North Central" , "Middle Atlantic",   "New England" ,
+                                                 "West South Central", "East South Central" , "South Atlantic",
+                                                 "Pacific", "Mountain", "West North Central" ))) %>%
+  mutate(month.abb = fct_reorder(month.abb, month))
+
+## Regions 
+df.regions <- data_frame(STATEABB = state.abb) %>%
+  mutate(region_2 = case_when(
+              STATEABB %in% c("CT", "ME", "MA", "NH", "VT", "RI") ~ "New England",
+              STATEABB %in% c("NY", "PA", "NJ") ~ "Middle Atlantic",
+              STATEABB %in% c("OH", "IN", "IL", "MI", "WI") ~ "East North Central",
+              STATEABB %in% c("DE", "MD", "DC", "VA", "WV", "NC", "SC", "GA", "FL") ~ "South Atlantic",
+              STATEABB %in% c("KY", "TN", "AL", "MS") ~ "East South Central",
+              STATEABB %in% c("TX", "LA", "AR", "OK") ~ "West South Central",
+              STATEABB %in% c("ND", "MN", "SD", "IA", "NE", "KS", "MO") ~ "West North Central",
+              STATEABB %in% c("MT", "WY", "ID", "NV", "UT", "CO", "AZ", "NM" ) ~ "Mountain",
+              STATEABB %in% c("WA", "OR", "CA") ~ "Pacific"
+              )) %>%
+  filter(!STATEABB %in% c("AK", "HI"))
+
+## Heat and WF smoke policies
+file <- paste0(folder, "/Heat_WFsmoke_Policies.xlsx")
+df.policies.og <- read.xlsx(file, sheet = "Sheet1")
+
+df.policies <- df.policies.og %>%
+  transmute(
+    STATEABB = State,
+    heat_OccStandard = case_when(
+      Heat_ExistingOccRegulation == "Yes" ~ "Regulation Exists",
+      Heat_Under.Development == "Yes" ~ "Regulation Under Development",
+      str_detect(Heat_Active.Legislation, "Pending") ~ "Legistation Pending",
+  ),
+  WFSmoke_OccStandard = case_when(
+    WFsmoke_ExistingOccRegulation == "Yes" ~ "Regulation Exists"
+  )  ) %>%
+  filter(!c(is.na(heat_OccStandard) & is.na(WFSmoke_OccStandard))) %>%
+  full_join(., df.regions) %>%
+  filter(!STATEABB == "MN") ## only indoor policies
+
+## SF Counties
+sf.counties <- counties(cb = TRUE, progress_bar = FALSE, year = 2021) %>%
+  filter(!STUSPS %in% c("AK", 'HI', "PR", "AS", "MP", "GU", "VI")) %>%
+#  filter(STUSPS %in% c("CT")) %>%
+  transmute(STATEFIPS = as.numeric( STATEFP), CNTYNAME = NAME, STATEABB = STUSPS, GEOID = as.numeric(GEOID))  %>%
+  full_join(., df.regions)
+
+## SF States
+sf.states <- sf.counties %>%
+  group_by(STATEABB, region_2) %>%
+  summarise(totalFIPS = fsum(STATEFIPS)) %>%
+  ungroup() %>%
+  st_make_valid()
+  
+## SF Regions
+sf.regions <- sf.counties %>%
+  group_by(region_2) %>%
+  summarise(totalFIPS = fsum(STATEFIPS)) %>%
+  ungroup() %>%
+  st_make_valid()
+```
+
+
+
+# Figure 1A
+Bar graph of change in average annual coexpos days above 80F threshold between 2019-2023 vs 2008-2012
+```{r}
+## Count annual co-exposure days above threshold
+df.HI.nDays.annual <- df.HI.smoke %>%
+  mutate(coexpos = if_else(smokePM_pred.wtd > 0 , "coexpos_days", "no coexpos"),
+         coexpos = if_else(is.na(smokePM_pred.wtd), "no coexpos", coexpos)) %>%
+  fmutate(indicator = case_when(
+    Year %in% 2008:2012 ~ "2008-2012",
+    Year %in% 2019:2023 ~ "2019-2023"
+  )) %>% 
+  select(region_2, region_1, GEOID, STATEFIPS, STATEABB, CNTYFIPS, CNTYNAME, Year, month, month.abb, yearmonday, crop_class, total_county_crop_area, mean.HI.wtd, smokePM_pred.wtd, coexpos, indicator) %>%
+  fgroup_by(GEOID, region_2, region_1, STATEFIPS, STATEABB, CNTYFIPS, CNTYNAME,crop_class, coexpos, Year, indicator) %>%
+  fsummarise(n_days_80F = fsum(mean.HI.wtd >=80   &  coexpos == "coexpos_days", na.rm = TRUE)
+             ) %>%
+  ungroup() %>%
+  ## ADD POLICY LABELS
+  full_join(., df.policies) %>%
+  mutate(heat_WF_policies = case_when(
+           !is.na(WFSmoke_OccStandard) ~ paste0("Heat Standard: ", heat_OccStandard, " & Wildfire Standard: ", WFSmoke_OccStandard),
+           is.na(heat_OccStandard) ~ "Heat Standard: None",
+           TRUE ~ paste0("Heat Standard: ", heat_OccStandard)
+         ),
+         heat_WF_policies = factor(heat_WF_policies, levels = c(
+                  "Heat Standard: Regulation Exists & Wildfire Standard: Regulation Exists",
+                      "Heat Standard: Regulation Exists",
+                      "Heat Standard: Legistation Pending",
+                      "Heat Standard: Regulation Under Development",
+                      "Heat Standard: None"))
+         )
+
+
+## Calculate difference in average annual co-exposure days between 2019-2023 vs 2008-2012 periods
+df.n.county.reg.1 <- df.HI.nDays.annual %>%
+  filter(coexpos == "coexpos_days",
+         crop_class == 1) %>%
+  ### average annual co-exposure days
+  group_by(GEOID, STATEABB, region_2, coexpos, crop_class, indicator, heat_WF_policies) %>%
+  summarise(n.avg.days = mean(n_days_80F, na.rm = TRUE)) %>%
+  select(indicator, STATEABB, region_2, GEOID, n.avg.days, heat_WF_policies) %>%
+  ### Difference between 2019-2023 vs 2008-2012 in each county
+  pivot_wider(names_from = indicator,
+              values_from = n.avg.days) %>%
+  mutate(thresholds = "n_days_80F",
+         across(c(`2019-2023`, `2008-2012`), ~if_else(is.na(.), 0, .)),
+         diff.avg.days = `2019-2023` - `2008-2012` ) %>%
+  ungroup() %>%
+  select(-`NA`) %>%
+  ### Average county change in coexposure days by STATE
+  group_by( region_2, STATEABB, coexpos, crop_class, thresholds, heat_WF_policies) %>%
+  summarise(diff.avg.days = mean(diff.avg.days, na.rm = TRUE))  %>%
+  ungroup()
+
+
+## threshold labels
+thresh = as_labeller(c(`n_days_80F`= "Average additional county\n co-exposure days \u226580\u00B0F") )
+
+## assign policy colours
+my_colors <- c("#fb8b24", "#e36414",  "#5f0f40", "#9a031e", "grey50")
+names(my_colors) <- c("Heat Standard: Regulation Exists & Wildfire Standard: Regulation Exists",
+                      "Heat Standard: Regulation Exists",
+                      "Heat Standard: Legistation Pending",
+                      "Heat Standard: Regulation Under Development",
+                      "Heat Standard: None")
+
+## Plot graph
+x.1A <- df.n.county.reg.1 %>% 
+  filter( thresholds == "n_days_80F") %>%
+  mutate(label = case_when(
+    diff.avg.days > 0 ~ paste0("+ ", round(diff.avg.days,1)),
+    diff.avg.days < 0 ~ paste0("- ", round(diff.avg.days,1)),
+  )) %>%
+  ggplot() + 
+  geom_bar(aes(x = diff.avg.days, y = reorder(STATEABB, diff.avg.days), fill = heat_WF_policies), stat = "identity", show.legend = FALSE ) +
+  geom_text(aes(x = diff.avg.days, y = reorder(STATEABB, diff.avg.days), label = label), hjust = -0.05, size = 2.05) + 
+  theme_bw() +
+  facet_wrap(~thresholds, ncol = 1, labeller = thresh ) +
+  scale_fill_manual(values = my_colors)+
+  ylab("") +
+  xlab("") +
+  expand_limits(x = 85) +
+  theme(aspect.ratio = 4,
+        strip.background = element_rect(fill = "white", color = "black"),
+        strip.text = element_text(size = 6),
+        axis.title.x = element_text(size = 6),
+        text = element_text(size = 6)
+        )
+```
+
+
+
+# Figure 1B 
+Map of EHSA hotspot clusters of days above 80F thresholds
+  1. Read in ArcGIS EHSA results shp file
+  2. Recategorize automatic EHSA patterns
+        - New hotspot and Consecutive hotspots --> Recent hotspot
+        - Persistent hotspot and Historical hotspot --> Consistent hotspot
+        - Intensifying hotspot --> Intensifying hotspot
+        - All others --> "No Pattern Detected"
+  3. Label counties if it had a significant EHSA category was in 80F EHSA
+  4. Outline states by Occupational Heat/Wildfire Standards
+```{r}
+## 80F
+file.80 <- paste0(folder, "/01a_final data/EHSA_results/EHSA_natl_80F.shp") ### EHSA shp file
+sf.80 <- st_read(file.80) %>%
+    mutate(PATTERN = case_when(
+    PATTERN %in% c("New Hot Spot", "Consecutive Hot Spot" ) ~ "Recent Hot Spot",
+    PATTERN %in% c("Persistent Hot Spot", "Historical Hot Spot") ~ "Consistent Hot Spot",
+    PATTERN %in% c("Sporadic Hot Spot", "Oscillating Hot Spot") ~ "No Pattern Detected",
+    TRUE ~ PATTERN
+  )) %>%
+  transmute(LOC_LABEL, CATEGORY,
+              PATTERN_80 = PATTERN)
+
+sf.80 <- st_transform(sf.80, crs = st_crs(sf.counties))
+
+
+## remove "no pattern detected" from 80F df
+sf.80.c <- sf.80 %>%
+  transmute(LOC_LABEL, CATEGORY, 
+            THRESHOLD = "80F",
+            PATTERN = PATTERN_80) %>%
+  filter(!PATTERN %in% c("No Pattern Detected")) %>%
+  filter(!is.na(PATTERN))  %>%
+  left_join(., sf.counties %>% mutate(LOC_LABEL = paste0("G", GEOID)) %>% st_drop_geometry())
+
+## generate hotspote palette
+x <- c("#804d36",   "#9972af", "#af8e53")
+palette.sel <- x
+names(palette.sel) <- c("Consistent Hot Spot" , "Intensifying Hot Spot",   "Recent Hot Spot")
+  
+
+## add to county and state geometries to space out states/counties by region
+##    - MD / DE are additionally separated to improve visualization
+sf.counties.1 <- sf.counties %>%
+  mutate(geometry = case_when(
+    region_2 == "East North Central" ~ geometry + c(0.75,0.75),
+    region_2 == "East South Central" ~ geometry + c(0.75,-0.5),
+    region_2 == "Middle Atlantic" ~ geometry + c(1.5,1),
+    region_2 == "Mountain" ~ geometry + c(-1.5,0.25),
+    region_2 == "New England" ~ geometry + c(2,1.25),
+    region_2 == "Pacific" ~ geometry + c(-3.5,0.5),
+    region_2 == "South Atlantic" ~ geometry + c(3,-0.75),
+    region_2 == "West North Central" ~ geometry + c(-0.5,0.5),
+    region_2 == "West South Central" ~ geometry + c(-0.5,-0.75),
+    TRUE ~ geometry + c(0,0)
+  )) %>%
+  mutate(geometry = case_when(
+    STATEABB == "MD" ~ geometry + c(0.5, 0.6),
+    STATEABB == "DE" ~ geometry + c(0.75, 0.75),
+    TRUE ~ geometry + c(0,0)
+  ))
+
+sf.states.1 <- sf.states %>%
+  mutate(  region_2 = case_when(
+    STATEABB == "MD" ~ "MD",
+    STATEABB == "DE" ~ "DE",
+    TRUE ~ region_2
+  ) ) %>%
+  filter(!is.na(region_2)) %>%
+  mutate(geometry = case_when(
+    region_2 == "East North Central" ~ geometry + c(0.75,0.75),
+    region_2 == "East South Central" ~ geometry + c(0.75,-0.5),
+    region_2 == "Middle Atlantic" ~ geometry + c(1.5,1),
+    region_2 == "Mountain" ~ geometry + c(-1.5,0.25),
+    region_2 == "New England" ~ geometry + c(2,1.25),
+    region_2 == "Pacific" ~ geometry + c(-3.5,0.5),
+    region_2 == "South Atlantic" ~ geometry + c(3,-0.75),
+    region_2 == "West North Central" ~ geometry + c(-0.5,0.5),
+    region_2 == "West South Central" ~ geometry + c(-0.5,-0.75),
+    TRUE ~ geometry + c(0,0)
+  )) %>%
+  mutate(geometry = case_when(
+    STATEABB == "MD" ~ geometry + c(3.5, -0.15),
+    STATEABB == "DE" ~ geometry + c(3.75, 0),
+    TRUE ~ geometry + c(0,0)
+  ) )
+
+
+sf.regions.1 <- sf.states.1 %>%
+  group_by(region_2) %>%
+  summarise(totalFIPS = sum(totalFIPS)) %>%
+  ungroup() 
+
+
+sf.80.c.1 <- sf.80.c %>%
+  mutate(geometry = case_when(
+    region_2 == "East North Central" ~ geometry + c(0.75,0.75),
+    region_2 == "East South Central" ~ geometry + c(0.75,-0.5),
+    region_2 == "Middle Atlantic" ~ geometry + c(1.5,1),
+    region_2 == "Mountain" ~ geometry + c(-1.5,0.25),
+    region_2 == "New England" ~ geometry + c(2,1.25),
+    region_2 == "Pacific" ~ geometry + c(-3.5,0.5),
+    region_2 == "South Atlantic" ~ geometry + c(3,-0.75),
+    region_2 == "West North Central" ~ geometry + c(-0.5,0.5),
+    region_2 == "West South Central" ~ geometry + c(-0.5,-0.75),
+    TRUE ~ geometry + c(0,0)
+  )) %>%
+  mutate(geometry = case_when(
+    STATEABB == "MD" ~ geometry + c(0.5, 0.6),
+    STATEABB == "DE" ~ geometry + c(0.75, 0.75),
+    TRUE ~ geometry + c(0,0)
+  ))
+
+
+
+## policies - standardize the language and add geometry
+sf.policies <- full_join(sf.states, df.policies) %>%
+    mutate(heat_WF_policies = case_when(
+             !is.na(WFSmoke_OccStandard) ~ paste0("Heat Standard: ", heat_OccStandard, " & Wildfire Standard: ", WFSmoke_OccStandard),
+             is.na(heat_OccStandard) ~ "No Heat or Wildfire Standard",
+             TRUE ~ paste0("Heat Standard: ", heat_OccStandard)
+           ),
+           heat_WF_policies = factor(heat_WF_policies, levels = c(
+                    "Heat Standard: Regulation Exists & Wildfire Standard: Regulation Exists",
+                        "Heat Standard: Regulation Exists",
+                        "Heat Standard: Legistation Pending",
+                        "Heat Standard: Regulation Under Development",
+                        "Heat Standard: None"))
+          ) %>%
+    filter(!is.na(heat_OccStandard)) %>%
+    select(-c(heat_OccStandard, WFSmoke_OccStandard)) %>%
+    select(STATEABB, heat_WF_policies, geometry) 
+
+sf.policies.1 <- sf.policies %>%
+  full_join(., df.regions) %>%
+  mutate(geometry = case_when(
+    region_2 == "East North Central" ~ geometry + c(0.75,0.75),
+    region_2 == "East South Central" ~ geometry + c(0.75,-0.5),
+    region_2 == "Middle Atlantic" ~ geometry + c(1.5,1),
+    region_2 == "Mountain" ~ geometry + c(-1.5,0.25),
+    region_2 == "New England" ~ geometry + c(2,1.25),
+    region_2 == "Pacific" ~ geometry + c(-3.5,0.5),
+    region_2 == "South Atlantic" ~ geometry + c(3,-0.75),
+    region_2 == "West North Central" ~ geometry + c(-0.5,0.5),
+    region_2 == "West South Central" ~ geometry + c(-0.5,-0.75),
+    TRUE ~ geometry + c(0,0)
+  )) %>%
+  relocate(geometry, .after = last_col()) %>%
+  mutate(geometry = case_when(
+    STATEABB == "MD" ~ geometry + c(0.5, 0.6),
+    STATEABB == "DE" ~ geometry + c(0.75, 0.75),
+    TRUE ~ geometry + c(0,0)
+  ))
+
+## generate palette for policies
+my_colors <- c("#fb8b24", "#e36414",  "#5f0f40", "#9a031e", "grey50")
+names(my_colors) <- c("Heat Standard: Regulation Exists & Wildfire Standard: Regulation Exists",
+                        "Heat Standard: Regulation Exists",
+                        "Heat Standard: Legistation Pending",
+                        "Heat Standard: Regulation Under Development",
+                        "Heat Standard: None")
+  
+
+## align / assign CRS
+st_crs(sf.regions.1 ) <- st_crs(sf.regions)
+st_crs(sf.counties.1 ) <- st_crs(sf.counties)
+st_crs(sf.states.1 ) <- st_crs(sf.states)
+st_crs(sf.80.c.1) <- st_crs(sf.80.c)
+st_crs(sf.policies.1) <- st_crs(sf.policies)
+
+# Plot EHSA map
+x.80<- tm_shape(sf.counties.1) +
+  tm_borders(col = "grey80",
+             lwd = 0.1) +
+  tm_shape(sf.80.c.1 ) +
+  tm_polygons(fill = tm_vars( "PATTERN"),
+              fill.scale = tm_scale_categorical(values = palette.sel),
+              col = "grey80",
+              lwd = 0.1) +
+  tm_shape(sf.states.1) +
+  tm_borders(col = "grey60",
+             lwd = 0.5) +
+  tm_shape(sf.regions.1) +
+  tm_borders(col = "grey30",
+             lwd = 0.75)  +
+  tm_shape(sf.policies.1) +
+  tm_borders(col = tm_vars("heat_WF_policies"),
+             col.scale = tm_scale_categorical(values = my_colors),
+             lwd = 1)
+
+
+```
+
+
+
+# Figure 1C
+Bar graph of percent of counties with increase, decrease or no change in average migrant farmworker coexposures in teh 2019-2023 period, compared to 2008-2012 baseline.
+```{r}
+df.migrants <- df.farmworker %>%
+  mutate(indicator = case_when(
+    Year %in% 2008:2012 ~ "2008-2012",
+    Year %in% 2019:2023 ~ "2019-2023"
+  )) %>%
+  # average number of migrant FW in each period
+  fgroup_by(indicator, GEOID, STATEABB, STATENAME, region_2, variable) %>%
+  fsummarise(mean_n_farmworker_imput = fmean(n_farmworker_imput)) %>%
+  filter(!is.na(indicator)) %>%
+  pivot_wider(names_from = indicator,
+              values_from = mean_n_farmworker_imput) %>%
+  # difference in migrant FW between periods
+  mutate(diff.08.23 = `2019-2023` - `2008-2012`, 
+         perc.08.23 = diff.08.23/`2008-2012`,
+         perc.08.23.100 = diff.08.23*100/`2008-2012`) %>%
+  filter(variable == "Migrant Labor") %>%
+  select(GEOID, region_2, STATEABB, STATENAME, diff.08.23, perc.08.23) %>%
+  filter(!STATEABB == "DC")
+
+
+## Percent of counties with increase / decrease / no change in migrant FW co-exposure days
+df.migrants.n <- df.migrants %>%
+  group_by(region_2, STATEABB, STATENAME) %>%
+  mutate(names = case_when(
+    diff.08.23 > 0 ~ "Increase",
+    diff.08.23 < 0 ~ "Decrease",
+    diff.08.23 == 0 ~ "No Change or \nNo Migrant FW",
+    is.na(diff.08.23) ~ "No Change or \nNo Migrant FW"
+  )) %>%
+  ungroup()  %>%
+  mutate(names = factor(names, levels = c("Increase", "Decrease", "No Change or \nNo Migrant FW"))) %>%
+  group_by(region_2, STATENAME, STATEABB) %>%
+  mutate(n_counties = n()) %>%
+  group_by(region_2, STATENAME, STATEABB, names, n_counties) %>%
+  summarise(values = n()) %>%
+  ungroup() %>%
+  mutate(perc = values / n_counties)
+
+## admin - organize states from highest to lowest percent of counties with increase
+df.fct <- df.migrants.n  %>%
+  filter(names =="Increase") %>%
+  group_by(names) %>%
+  arrange(names, -perc) %>%
+  mutate(id_n = row_number()) %>%
+  ungroup() %>%
+  select(region_2, STATEABB, STATENAME, id_n) %>%
+  ungroup()
+
+## generate palette for increase / decrease / no change
+my_colours = colorRampPalette(brewer.pal(3, "Dark2"))
+my_colours <- my_colours(3)
+names(my_colours) <- c("Increase", "Decrease","No Change or \nNo Migrant FW")
+
+## plot graph
+x <- df.migrants.n %>% 
+  full_join(., df.fct) %>% 
+  ## make sure that De, WV and RI are last
+  mutate(
+    id_n = case_when(
+      STATEABB == "DE" ~ 46,
+      STATEABB == "WV" ~ 47,
+      STATEABB == "RI" ~ 48,
+      TRUE ~ id_n
+    )
+  ) %>%
+  mutate(STATEABB = fct_reorder(STATEABB, id_n, .desc = FALSE ),
+         STATENAME = fct_reorder(STATENAME, id_n, .desc = FALSE)) %>%
+  ggplot() +
+  geom_bar(aes(x = STATENAME, y = values, fill = names), position = "fill", stat = "identity") +
+  theme_bw() +
+  theme(aspect.ratio = 0.25,
+        axis.title.x = element_blank(),
+        panel.grid = element_blank(),
+        legend.title = element_blank(),
+        axis.text.x = element_text(size = 3, angle = 45, hjust = 0.95)
+        ) +
+  ylab("Percent of \ncounties") +
+  scale_fill_manual(values = my_colours) +
+  scale_y_continuous(labels = label_percent(),
+                     breaks = seq(0,1, by = 0.25))
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
